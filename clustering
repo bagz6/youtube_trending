@@ -1,0 +1,148 @@
+import pandas as pd
+import json
+import numpy as np
+from plotnine import *
+import plotnine
+from kmodes.kprototypes import KPrototypes
+import warnings
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+
+# load json and view in dataframe
+path_to_json_file = "d:/delman.io/youtube-categories.json"
+
+
+json_file = open(path_to_json_file, 'r')
+loaded_json = json_file.read()
+json_file.close()
+df_json = pd.read_json(loaded_json)
+df_json_snippet = pd.json_normalize(df_json["snippet"], sep = ",")
+df_json2 = df_json[['kind', 'etag', 'id']]
+df_json_final = pd.merge(df_json2, df_json_snippet, left_index=True, right_index=True)
+
+#load parquet
+path_to_parquet_file = "d:/delman.io/youtube-videos.parquet"
+
+df_parquet = pd.read_parquet(path_to_parquet_file, engine='pyarrow')
+# print('Dimension data: {} rows and {} columns'.format(len(df_parquet), len(df_parquet.columns)))
+df_join = pd.merge(df_parquet, df_json_final, left_on='category_id', right_on='id')
+df_join_final = df_join.loc[:,('title_x', 'channel_title', 'title_y', 'tags', 'views', 'likes', 'dislikes', 'comment_count','description')]
+df_join_final.rename(columns = {'title_x':'video_title', 'title_y':'category_title'}, inplace = True)
+
+# The distribution of category_title
+df_category_title = pd.DataFrame(df_join_final['category_title'].value_counts()).reset_index()
+df_category_title['Percentage'] = df_category_title['category_title'] / df_join_final['category_title'].value_counts().sum()
+df_category_title.rename(columns = {'index':'category_title', 'category_title':'Total'}, inplace = True)
+df_category_title = df_category_title.sort_values('Total', ascending = True).reset_index(drop = True)
+
+# The dataframe
+df_category_title = df_join_final.groupby('category_title').agg({
+    'category_title': 'count',
+    'views': 'mean',
+    'likes': 'mean',
+    'dislikes': 'mean',
+    'comment_count': 'mean'
+    }
+).rename(columns = {'category_title': 'Total'}).reset_index().sort_values('Total', ascending = True)
+
+# plotnine.options.figure_size = (8, 4.8)
+# print(
+#     ggplot(data = df_category_title)+
+#     geom_bar(aes(x = 'category_title',
+#                  y = 'Total'),
+#              fill = np.where(df_category_title['category_title'] == 'Entertainment', '#981220', '#80797c'),
+#              stat = 'identity')+
+#     geom_text(aes(x = 'category_title',
+#                    y = 'Total',
+#                    label = 'Total'),
+#                size = 10,
+#                nudge_y = 350)+
+#     labs(title = 'Video Category that has the highest count')+
+#     xlab('category_title')+
+#     ylab('Frequency')+
+#     scale_x_discrete(limits = df_category_title['category_title'].tolist())+
+#     theme_minimal()+
+#     coord_flip()
+# )
+
+df_join_final['video_title']    = df_join_final['video_title'].astype(str)
+df_join_final['channel_title']  = df_join_final['channel_title'].astype(str)
+df_join_final['category_title'] = df_join_final['category_title'].astype(str)
+df_join_final['tags']           = df_join_final['tags'].astype(str)
+df_join_final['description']    = df_join_final['description'].astype(str)
+df_join_final['views']          = df_join_final['views'].astype(float)
+df_join_final['likes']          = df_join_final['likes'].astype(float)
+df_join_final['dislikes']       = df_join_final['dislikes'].astype(float)
+df_join_final['comment_count']  = df_join_final['comment_count'].astype(float)
+
+catColumnsPos = [df_join_final.columns.get_loc(col) for col in list(df_join_final.select_dtypes('object').columns)]
+# print('Categorical columns           : {}'.format(list(df_join_final.select_dtypes('object').columns)))
+# print('Categorical columns position  : {}'.format(catColumnsPos))
+
+dfMatrix = df_join_final.to_numpy()
+cost = []
+for cluster in tqdm(range(1, 6)):
+    kprototype = KPrototypes(n_jobs = -1, n_clusters = cluster, init = 'Huang', random_state = 0)
+    kprototype.fit_predict(dfMatrix, categorical = catColumnsPos)
+    cost.append(kprototype.cost_)
+    print('Cluster initiation: {}'.format(cluster))
+
+# Converting the results into a dataframe and plotting them
+df_cost = pd.DataFrame({'Cluster':range(1, 6), 'Cost':cost})
+# Data viz
+plotnine.options.figure_size = (8, 4.8)
+(
+    ggplot(data = df_cost)+
+    geom_line(aes(x = 'Cluster',
+                  y = 'Cost'))+
+    geom_point(aes(x = 'Cluster',
+                   y = 'Cost'))+
+    geom_label(aes(x = 'Cluster',
+                   y = 'Cost',
+                   label = 'Cluster'),
+               size = 10,
+               nudge_y = 1000) +
+    labs(title = 'Optimal number of cluster with Elbow Method')+
+    xlab('Number of Clusters k')+
+    ylab('Cost')+
+    theme_minimal()
+)
+# Fit the cluster
+kprototype = KPrototypes(n_jobs = -1, n_clusters = 3, init = 'Huang', random_state = 0)
+kprototype.fit_predict(dfMatrix, categorical = catColumnsPos)
+
+#cluster centroid
+kprototype.cluster_centroids_
+
+# Check the iteration of the clusters created
+kprototype.n_iter_
+
+# Check the cost of the clusters created
+kprototype.cost_
+
+# Add the cluster to the dataframe
+df_join_final['Cluster Labels'] = kprototype.labels_
+df_join_final['Segment'] = df_join_final['Cluster Labels'].map({0:'First', 1:'Second', 2:'Third'})
+# Order the cluster
+df_join_final['Segment'] = df_join_final['Segment'].astype('category')
+df_join_final['Segment'] = df_join_final['Segment'].cat.reorder_categories(['First','Second','Third'])
+df_join_final
+
+df_join_final.dtypes
+# df_finals_agg = df_join_final.groupby(['video_title', 'tags', 'description', 'channel_title', 'category_title', 'Cluster Labels', 'Segment'])[['views', 'likes', 'dislikes', 'comment_count']].mean()
+# df_finals_agg
+
+# Cluster interpretation
+df_join_final.rename(columns = {'Cluster Labels':'Total'}, inplace = True)
+df_join_final.groupby('Segment').agg(
+    {
+        'Total':'count',
+        'channel_title': lambda x: x.value_counts().index[0],
+        'category_title': lambda x: x.value_counts().index[0],
+        'tags': lambda x: x.value_counts().index[0],
+        'views': 'mean',
+        'likes': 'mean',
+        'dislikes': 'mean',
+        'comment_count': 'mean'
+    }
+).reset_index()
